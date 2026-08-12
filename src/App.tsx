@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
   BOARD_HEIGHT,
   BOARD_WIDTH,
@@ -9,6 +9,7 @@ import {
 } from "./game/engine";
 import type { Cell, GameAction, GameState, TetrominoType } from "./game/types";
 import { createClearEvent, type CharacterId, type ClearEvent } from "./game/events";
+import { classifyBoardGesture, type GesturePoint } from "./game/gestures";
 
 type ThemeId = "starlight" | "candy" | "rainbow";
 
@@ -29,6 +30,7 @@ const PIECE_LABELS: Record<TetrominoType, string> = {
 };
 
 const INITIAL_THEME = "starlight" as ThemeId;
+const GESTURE_TUTORIAL_KEY = "starry-tetris-gesture-tutorial-dismissed";
 
 function readTheme(): ThemeId {
   if (typeof window === "undefined") return INITIAL_THEME;
@@ -43,6 +45,16 @@ function readHighScore(): number {
 
 function formatNumber(value: number): string {
   return value.toLocaleString("ko-KR");
+}
+
+function triggerHaptic(status: GameState["status"], pattern: number | number[]) {
+  if (
+    status !== "playing" ||
+    typeof navigator === "undefined" ||
+    !navigator.vibrate ||
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  ) return;
+  navigator.vibrate(pattern);
 }
 
 function getCell(board: Cell[][], activeCells: Map<string, TetrominoType>, x: number, y: number): Cell {
@@ -64,6 +76,22 @@ function MiniPiece({ type }: { type: TetrominoType | null }) {
         const occupied = miniCells.some((cell) => cell.x === x && cell.y === y);
         return <span className={occupied ? "mini-cell filled" : "mini-cell"} key={index} />;
       })}
+    </div>
+  );
+}
+
+function MobileGestureTutorial({ onClose, onDismissForever }: { onClose: () => void; onDismissForever: () => void }) {
+  return (
+    <div className="mobile-gesture-tutorial" role="dialog" aria-modal="true" aria-label="모바일 조작 방법">
+      <span className="tutorial-sparkle">✦</span>
+      <strong>손끝으로 별빛을 움직여요!</strong>
+      <div className="tutorial-gestures">
+        <div><span className="gesture-demo tap-demo">●</span><b>탭</b><small>회전</small></div>
+        <div><span className="gesture-demo slide-demo">← →</span><b>좌우</b><small>이동</small></div>
+        <div><span className="gesture-demo drop-demo">↓</span><b>아래로</b><small>드롭</small></div>
+      </div>
+      <button className="tutorial-start" onClick={onClose}>알겠어요!</button>
+      <button className="tutorial-dismiss" onClick={onDismissForever}>다시 보지 않기</button>
     </div>
   );
 }
@@ -133,7 +161,10 @@ export default function App() {
   const [highScore, setHighScore] = useState(readHighScore);
   const [theme, setTheme] = useState<ThemeId>(readTheme);
   const [clearEvent, setClearEvent] = useState<ClearEvent | null>(null);
+  const [showGestureTutorial, setShowGestureTutorial] = useState(false);
   const eventId = useRef(0);
+  const boardPointer = useRef<{ id: number; start: GesturePoint } | null>(null);
+  const tutorialClosedThisSession = useRef(false);
 
   const unlockedThemes = THEMES.filter((item) => game.lines >= item.unlockAt);
   const safeTheme = unlockedThemes.some((item) => item.id === theme) ? theme : INITIAL_THEME;
@@ -154,6 +185,17 @@ export default function App() {
   }, [safeTheme]);
 
   useEffect(() => {
+    const mobileQuery = window.matchMedia("(max-width: 700px)");
+    const updateTutorial = () => {
+      const hasDismissedPermanently = window.localStorage.getItem(GESTURE_TUTORIAL_KEY) === "true";
+      setShowGestureTutorial(mobileQuery.matches && !hasDismissedPermanently && !tutorialClosedThisSession.current);
+    };
+    updateTutorial();
+    mobileQuery.addEventListener("change", updateTutorial);
+    return () => mobileQuery.removeEventListener("change", updateTutorial);
+  }, []);
+
+  useEffect(() => {
     if (game.lines === 0 || game.lastCleared === 0) return undefined;
     const nextEvent = createClearEvent({
       cleared: game.lastCleared,
@@ -162,6 +204,7 @@ export default function App() {
       id: ++eventId.current,
     });
     setClearEvent(nextEvent);
+    triggerHaptic(game.status, game.lastCleared >= 4 ? [28, 45, 45] : [22, 30, 22]);
     const timeout = window.setTimeout(() => setClearEvent(null), 1600);
     return () => window.clearTimeout(timeout);
   }, [game.lines]);
@@ -176,6 +219,37 @@ export default function App() {
 
   const dispatch = useCallback((action: GameAction) => {
     setGame((current) => reduceGame(current, action));
+  }, []);
+
+  const dispatchWithHaptic = useCallback((action: GameAction, vibration: number | number[]) => {
+    if (game.status !== "playing" && action.type !== "pause") return;
+    dispatch(action);
+    triggerHaptic(game.status, vibration);
+  }, [dispatch, game.status]);
+
+  const handleBoardPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (game.status !== "playing") return;
+    const target = event.target as HTMLElement;
+    if (target.closest(".board-message, .mobile-gesture-tutorial")) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    boardPointer.current = { id: event.pointerId, start: { x: event.clientX, y: event.clientY } };
+  }, [game.status]);
+
+  const handleBoardPointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const pointer = boardPointer.current;
+    boardPointer.current = null;
+    if (!pointer || pointer.id !== event.pointerId || game.status !== "playing") return;
+    const gesture = classifyBoardGesture(pointer.start, { x: event.clientX, y: event.clientY });
+    if (gesture === "rotate") dispatchWithHaptic({ type: "rotate", direction: 1 }, 12);
+    if (gesture === "move-left") dispatchWithHaptic({ type: "move", dx: -1 }, 10);
+    if (gesture === "move-right") dispatchWithHaptic({ type: "move", dx: 1 }, 10);
+    if (gesture === "hard-drop") dispatchWithHaptic({ type: "hard-drop" }, [18, 24, 26]);
+  }, [dispatchWithHaptic, game.status]);
+
+  const hideGestureTutorial = useCallback((remember: boolean) => {
+    tutorialClosedThisSession.current = true;
+    if (remember) window.localStorage.setItem(GESTURE_TUTORIAL_KEY, "true");
+    setShowGestureTutorial(false);
   }, []);
 
   useEffect(() => {
@@ -240,7 +314,14 @@ export default function App() {
 
         <div className="board-wrap">
           <div className="board-heading"><span>STAGE {String(game.level).padStart(2, "0")}</span><span>{game.status === "paused" ? "PAUSED" : game.status === "gameover" ? "GAME OVER" : "LIVE"}</span></div>
-          <div className={`board ${game.lastCleared > 0 ? "board-flash" : ""}`} role="grid" aria-label="테트리스 보드">
+          <div
+            className={`board ${game.lastCleared > 0 ? "board-flash" : ""}`}
+            role="grid"
+            aria-label="테트리스 보드. 탭하면 회전하고, 좌우로 쓸면 이동하며, 아래로 쓸면 즉시 떨어집니다."
+            onPointerDown={handleBoardPointerDown}
+            onPointerUp={handleBoardPointerUp}
+            onPointerCancel={() => { boardPointer.current = null; }}
+          >
             {Array.from({ length: BOARD_HEIGHT * BOARD_WIDTH }, (_, index) => {
               const x = index % BOARD_WIDTH;
               const y = Math.floor(index / BOARD_WIDTH);
@@ -249,19 +330,26 @@ export default function App() {
               return <div className={`cell ${cell ? `cell-${cell}` : ""} ${isGhost ? `ghost-${ghost.type}` : ""}`} key={index} role="gridcell" />;
             })}
             {clearEvent && <ClearCelebration event={clearEvent} />}
+            {showGestureTutorial && <MobileGestureTutorial onClose={() => hideGestureTutorial(false)} onDismissForever={() => hideGestureTutorial(true)} />}
             {game.status === "ready" && <div className="board-message"><span>✦</span><strong>준비됐나요?</strong><small>버튼을 눌러 별빛을 쌓아보세요</small></div>}
             {game.status === "paused" && <div className="board-message"><span>Ⅱ</span><strong>잠깐 쉬어가기</strong><small>일시정지 버튼을 누르면 계속돼요</small></div>}
             {game.status === "gameover" && <div className="board-message"><span>✧</span><strong>별빛이 가득 찼어요!</strong><small>다시 시작해서 더 높은 곳으로</small></div>}
           </div>
           <p className="sr-only" aria-live="polite">{clearEvent?.announcement ?? ""}</p>
           <div className="touch-controls" aria-label="터치 조작">
-            <button onClick={() => dispatch({ type: "move", dx: -1 })} aria-label="왼쪽 이동">←</button>
-            <button onClick={() => dispatch({ type: "rotate", direction: -1 })} aria-label="왼쪽 회전">↶</button>
-            <button onClick={() => dispatch({ type: "soft-drop" })} aria-label="빠르게 내리기">↓</button>
-            <button onClick={() => dispatch({ type: "rotate", direction: 1 })} aria-label="오른쪽 회전">↷</button>
-            <button onClick={() => dispatch({ type: "move", dx: 1 })} aria-label="오른쪽 이동">→</button>
-            <button className="drop-button" onClick={() => dispatch({ type: "hard-drop" })} aria-label="블록 즉시 내리기">✦ DROP</button>
+            <button onClick={() => dispatchWithHaptic({ type: "move", dx: -1 }, 10)} aria-label="왼쪽 이동">←</button>
+            <button onClick={() => dispatchWithHaptic({ type: "rotate", direction: -1 }, 12)} aria-label="왼쪽 회전">↶</button>
+            <button onClick={() => dispatchWithHaptic({ type: "soft-drop" }, 10)} aria-label="빠르게 내리기">↓</button>
+            <button onClick={() => dispatchWithHaptic({ type: "rotate", direction: 1 }, 12)} aria-label="오른쪽 회전">↷</button>
+            <button onClick={() => dispatchWithHaptic({ type: "move", dx: 1 }, 10)} aria-label="오른쪽 이동">→</button>
+            <button className="drop-button" onClick={() => dispatchWithHaptic({ type: "hard-drop" }, [18, 24, 26])} aria-label="블록 즉시 내리기">✦ DROP</button>
           </div>
+          <div className="mobile-quick-controls" aria-label="모바일 보조 조작">
+            <button onClick={() => dispatchWithHaptic({ type: "hold" }, 10)} aria-label="블록 보관"><span>☁</span>보관</button>
+            <button className="quick-drop" onClick={() => dispatchWithHaptic({ type: "hard-drop" }, [18, 24, 26])} aria-label="블록 즉시 내리기"><span>✦</span>DROP</button>
+            <button onClick={() => dispatch({ type: "pause" })} aria-label="게임 일시정지 또는 계속하기"><span>Ⅱ</span>일시정지</button>
+          </div>
+          <p className="mobile-gesture-hint">탭 회전 · 좌우로 이동 · 아래로 쓸어내리면 DROP</p>
         </div>
 
         <aside className="side-panel right-panel">

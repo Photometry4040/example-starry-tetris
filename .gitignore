@@ -1,0 +1,15 @@
+# Package managers
+node_modules/
+
+# Build and tool output
+dist/
+coverage/
+*.tsbuildinfo
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/

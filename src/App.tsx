@@ -31,6 +31,7 @@ const PIECE_LABELS: Record<TetrominoType, string> = {
 
 const INITIAL_THEME = "starlight" as ThemeId;
 const GESTURE_TUTORIAL_KEY = "starry-tetris-gesture-tutorial-dismissed";
+const MOBILE_LAYOUT_QUERY = "(max-width: 700px), (max-height: 500px) and (max-width: 900px)";
 
 function readTheme(): ThemeId {
   if (typeof window === "undefined") return INITIAL_THEME;
@@ -156,6 +157,17 @@ function ClearCelebration({ event }: { event: ClearEvent }) {
   );
 }
 
+function MobileGameHud({ game }: { game: GameState }) {
+  return (
+    <section className="mobile-game-hud" aria-label="현재 게임 현황">
+      <div><span>SCORE</span><strong aria-live="polite">{formatNumber(game.score)}</strong></div>
+      <div><span>LINES</span><strong aria-live="polite">{String(game.lines).padStart(2, "0")}</strong></div>
+      <div><span>COMBO</span><strong aria-live="polite">{game.combo > 1 ? `${game.combo}x` : "—"}</strong></div>
+      <div><span>STAGE</span><strong aria-live="polite">{String(game.level).padStart(2, "0")}</strong></div>
+    </section>
+  );
+}
+
 export default function App() {
   const [game, setGame] = useState<GameState>(() => createGameState());
   const [highScore, setHighScore] = useState(readHighScore);
@@ -168,6 +180,7 @@ export default function App() {
 
   const unlockedThemes = THEMES.filter((item) => game.lines >= item.unlockAt);
   const safeTheme = unlockedThemes.some((item) => item.id === theme) ? theme : INITIAL_THEME;
+  const isMobileGameplay = game.status === "playing" || game.status === "paused" || game.status === "gameover";
   const ghost = useMemo(() => getGhostPiece(game), [game]);
   const activeMap = useMemo(() => buildPieceMap(game.active), [game.active]);
   const ghostMap = useMemo(() => buildPieceMap(ghost), [ghost]);
@@ -185,7 +198,7 @@ export default function App() {
   }, [safeTheme]);
 
   useEffect(() => {
-    const mobileQuery = window.matchMedia("(max-width: 700px)");
+    const mobileQuery = window.matchMedia(MOBILE_LAYOUT_QUERY);
     const updateTutorial = () => {
       const hasDismissedPermanently = window.localStorage.getItem(GESTURE_TUTORIAL_KEY) === "true";
       setShowGestureTutorial(mobileQuery.matches && !hasDismissedPermanently && !tutorialClosedThisSession.current);
@@ -194,6 +207,28 @@ export default function App() {
     mobileQuery.addEventListener("change", updateTutorial);
     return () => mobileQuery.removeEventListener("change", updateTutorial);
   }, []);
+
+  useEffect(() => {
+    const mobileQuery = window.matchMedia(MOBILE_LAYOUT_QUERY);
+    const updateMobileSession = () => {
+      const shouldLockViewport = mobileQuery.matches && isMobileGameplay;
+      document.body.classList.toggle("mobile-gameplay-active", shouldLockViewport);
+      if (shouldLockViewport) {
+        document.documentElement.style.setProperty("--mobile-viewport-height", `${window.innerHeight}px`);
+      } else {
+        document.documentElement.style.removeProperty("--mobile-viewport-height");
+      }
+    };
+    updateMobileSession();
+    mobileQuery.addEventListener("change", updateMobileSession);
+    window.addEventListener("resize", updateMobileSession);
+    return () => {
+      mobileQuery.removeEventListener("change", updateMobileSession);
+      window.removeEventListener("resize", updateMobileSession);
+      document.body.classList.remove("mobile-gameplay-active");
+      document.documentElement.style.removeProperty("--mobile-viewport-height");
+    };
+  }, [isMobileGameplay]);
 
   useEffect(() => {
     if (game.lines === 0 || game.lastCleared === 0) return undefined;
@@ -275,7 +310,7 @@ export default function App() {
   const avatarStage = game.lines >= 25 ? "무지개 마법사" : game.lines >= 10 ? "캔디 요정" : "별빛 견습생";
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${isMobileGameplay ? "mobile-gameplay" : ""}`}>
       <div className="sparkle sparkle-one">✦</div>
       <div className="sparkle sparkle-two">✧</div>
       <header className="topbar">
@@ -288,6 +323,8 @@ export default function App() {
           <button className="icon-button" onClick={() => dispatch({ type: "pause" })} aria-label="게임 일시정지 또는 계속하기">Ⅱ</button>
         </div>
       </header>
+
+      {isMobileGameplay && <MobileGameHud game={game} />}
 
       <section className="intro-copy">
         <p className="eyebrow">✿ GEM DROP CLUB</p>
@@ -331,9 +368,9 @@ export default function App() {
             })}
             {clearEvent && <ClearCelebration event={clearEvent} />}
             {showGestureTutorial && <MobileGestureTutorial onClose={() => hideGestureTutorial(false)} onDismissForever={() => hideGestureTutorial(true)} />}
-            {game.status === "ready" && <div className="board-message"><span>✦</span><strong>준비됐나요?</strong><small>버튼을 눌러 별빛을 쌓아보세요</small></div>}
-            {game.status === "paused" && <div className="board-message"><span>Ⅱ</span><strong>잠깐 쉬어가기</strong><small>일시정지 버튼을 누르면 계속돼요</small></div>}
-            {game.status === "gameover" && <div className="board-message"><span>✧</span><strong>별빛이 가득 찼어요!</strong><small>다시 시작해서 더 높은 곳으로</small></div>}
+            {game.status === "ready" && <div className="board-message"><span>✦</span><strong>준비됐나요?</strong><small>버튼을 눌러 별빛을 쌓아보세요</small><button className="mobile-board-action" onClick={() => dispatch({ type: "start" })}>게임 시작</button></div>}
+            {game.status === "paused" && <div className="board-message"><span>Ⅱ</span><strong>잠깐 쉬어가기</strong><small>준비되면 별빛 쌓기를 이어가요</small><button className="mobile-board-action" onClick={() => dispatch({ type: "pause" })}>계속하기</button></div>}
+            {game.status === "gameover" && <div className="board-message"><span>✧</span><strong>별빛이 가득 찼어요!</strong><small>다시 시작해서 더 높은 곳으로</small><button className="mobile-board-action" onClick={() => dispatch({ type: "start" })}>다시 도전하기</button></div>}
           </div>
           <p className="sr-only" aria-live="polite">{clearEvent?.announcement ?? ""}</p>
           <div className="touch-controls" aria-label="터치 조작">
